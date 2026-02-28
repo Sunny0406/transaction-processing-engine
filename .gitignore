@@ -1,0 +1,7 @@
+build/
+*.o
+*.out
+*.a
+*.so
+*.log
+*.db
