@@ -1,7 +1,21 @@
+# macOS metadata files
 .DS_Store
+# build artifacts
 build/
 *.o
 *.out
+
+# RocksDB runtime files
+mydb/
+*.sst
+LOG
+MANIFEST-*
+OPTIONS-*
+CURRENT
+LOCK
+IDENTITY-*
+
+# Backup and log files
 *.a
 *.so
 *.log
