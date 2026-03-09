@@ -20,3 +20,5 @@ IDENTITY-*
 *.so
 *.log
 *.db
+
+/rocksdb
