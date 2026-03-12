@@ -1,6 +1,14 @@
 #include <argparse/argparse.hpp> 
 #include <fstream> // for file I/O
 #include <input_parse.h> // for workload parsing
+#include "transaction.h" // for transaction execution logic
+#include "transaction_manager.h" // for transaction management and CC logic
+#include "rocksdb_wrapper.h" // for RocksDB access
+#include "input_parse.h" // for loading initial data and parsing workload templates
+#include <iostream>
+#include <chrono> // for latency measurement
+#include <random> // for random key selection in transaction instantiation
+
 
 using namespace std;
 using json = nlohmann::json;
@@ -36,6 +44,59 @@ void verifyLoading(RocksDBWrapper& db, const KeySpace& ks) {
     check(ks.customer_keys, "Customer");
 }
 
+
+// Workload Runner (single-threaded for now, no CC logic yet)
+void RunWorkload(TransactionManager& mgr, const std::vector<TxnTemplate>& templates,
+                 const KeySpace& ks,
+                 int num_transactions,
+                 double hot_prob, int hot_size) {
+
+    // set fixed seed for reproducibility
+    std::mt19937 rng(42);
+
+    if (templates.empty()){
+        std::cerr << "No transaction templates to run!\n";
+        return;
+    }
+    
+    int committed = 0; // for recording metrics, 
+    int aborted = 0; // for recording metrics
+
+    auto start = std::chrono::steady_clock::now(); // start time for latency measurement
+
+    for (int i=0; i<num_transactions; i++){
+        // round-robin template selection
+        const TxnTemplate& tmpl = templates[i % templates.size()];
+
+        // randomly assign actual keys to each input parameter
+        // directly use instantiateTransaction() instead
+        std::map<std::string, std::string> bindings;
+        bindings = instantiateTransaction(tmpl, ks, rng, hot_prob, hot_size); // 50% hot prob, hotset size 5
+        
+        // execute through transaction manager
+        try{
+            executeTxn(tmpl, bindings, mgr); // execute the transaction template with the given key bindings through the transaction manager (which will handle CC logic later)
+            committed++;
+        } catch (const std::exception& e) {
+            std::cout << "Transaction execution error: " << e.what() << "\n";
+            aborted++;
+        }
+
+    }
+
+    auto end = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(end - start).count();
+
+    std::cout << "\n=== RunWorkload Results ===\n";
+    std::cout << "  Transactions: " << num_transactions << "\n";
+    std::cout << "  Committed   : " << committed << "\n";
+    std::cout << "  Aborted     : " << aborted << "\n";
+    std::cout << "  Elapsed     : " << elapsed << "s\n";
+    if (elapsed > 0)
+        std::cout << "  Throughput  : " << (committed / elapsed) << " txns/sec\n";
+
+
+}
 
 
 auto main(int argc, char *argv[]) -> int {
@@ -74,21 +135,25 @@ auto main(int argc, char *argv[]) -> int {
     // std::cout << "Loaded "
     //           << ks.account_keys.size() << " accounts, "
     //           << ks.district_keys.size() << " districts\n";
-    std::cout << "Loaded "
+    /* std::cout << "Loaded "
               << ks2.account_keys.size() << " accounts, "
-              << ks2.district_keys.size() << " districts\n";
+              << ks2.district_keys.size() << " districts\n"; */
 
-    verifyLoading(db, ks2);
+    //verifyLoading(db, ks2);
 
     // 2. Parse workload
     Workload workload = parseWorkloadFile("workload2.txt");
 
     // 3. Test 1: verify parsing structure + type inference
-    std::cout << "\n=== Verifying Workload Parsing ===\n";
-    printWorkload(workload);
+    //std::cout << "\n=== Verifying Workload Parsing ===\n";
+    //printWorkload(workload);
 
     // 4. Test 2: verify random key selection from keyspace + actual execution
-    testWorkloadExecution(workload, ks2, db);
+    // testWorkloadExecution(workload, ks2, db);
+
+    // switch CC mode
+    TransactionManager txn_mgr(db.getDB(), CCMode::OCC); // start with OCC for testing
+    RunWorkload(txn_mgr, workload.templates, ks2, /*num_transactions=*/10, /*hot_prob=*/0.5, /*hot_size=*/5);
 
     return 0;
 

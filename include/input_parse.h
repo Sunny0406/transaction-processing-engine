@@ -8,6 +8,9 @@
 #include <sstream>
 #include <regex>
 #include "rocksdb_wrapper.h"
+#include <random>
+#include "transaction_manager.h" // for executeTxn
+
 
 using namespace std;
 using json = nlohmann::json;
@@ -91,3 +94,13 @@ void printWorkload(const Workload& workload);
 
 // test 2: verify random key selection from keyspace + actual execution
 void testWorkloadExecution(const Workload& workload, const KeySpace& ks, RocksDBWrapper& db);
+
+std::map<std::string, std::string> instantiateTransaction(
+    const TxnTemplate& tmpl,
+    const KeySpace& ks,
+    std::mt19937& rng,
+    double hot_prob,
+    int    hot_size);
+
+void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
+                TransactionManager& txn_mgr);

@@ -1,4 +1,5 @@
 #include "input_parse.h"
+#include "transaction_manager.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -231,7 +232,7 @@ Workload parseWorkloadFile(const std::string& filename) {
 
 // bind real keys to param names
 void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
-                RocksDBWrapper& db) {
+                TransactionManager& txn_mgr) {
     // binding: e.g. "FROM_KEY" → "A_123", "TO_KEY" → "A_456"
     // which means key to key_param mapping for this txn instance
 
@@ -239,19 +240,35 @@ void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
     map<string, json> vars; // json objects for variables like "from_acc", "to_acc", etc.
     map<string, int> plain_vars; // for plain int variables like "o_id"
 
+    // Begin the transaction by using Begin()
+    Transaction* txn = txn_mgr.Begin();
+
+
+
     for (auto& op:tmpl.ops){
         // key_param is key
         // var is value
         switch(op.type){
             case OpType::READ: {
                 string key = binding.at(op.key_param); // e.g. "FROM_KEY" → "A_123"
-                vars[op.var] = db.get(key);            // e.g. from_acc = db.get("A_123")
+                // vars[op.var] = db.get(key);            // e.g. from_acc = db.get("A_123")
+
+                // use TransactionManager's Read() to read and record in read_set for OCC validation later
+                bool success = txn_mgr.Read(txn, key, vars[op.var]); // read from db and record in txn's read set for OCC
+                if (!success) {
+                    throw std::runtime_error("Failed to read from transaction manager");
+                }
+
                 break;
             }
             case OpType::WRITE: {
                 // WRITE(key_param, var) -> write local value(var) to db at key(key_param)
                 string key = binding.at(op.key_param); // e.g. "FROM_KEY" →
-                db.put(key, vars[op.var]);             // e.g. db.put("A_123", from_acc)
+                //db.put(key, vars[op.var]);             // e.g. db.put("A_123", from_acc)
+                // without CC, we can write immediately;
+                // with CC, we would buffer the write and apply at commit time after validation
+                txn_mgr.Write(txn, key, vars[op.var]);
+                
                 break;
             }
             case OpType::ASSIGN: {
@@ -274,6 +291,7 @@ void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
                 break;
             }
             case OpType::COMMIT:{
+                txn_mgr.Commit(txn); // for now just commit immediately without validation since we haven't implemented CC yet
                 break; // let CC layer handle commit logic (validation, flushing writes, etc.)
             }
         }   
@@ -336,17 +354,16 @@ void printWorkload(const Workload& workload) {
 // to keyspace categories
 
 std::string inferTypeFromParam(const std::string& param) {
-    // // for debugging "all types unknown" issue: print the param name being inferred
-    std::cout << "[DEBUG] Inferring type for param: " << param << "\n";
+    // for debugging "all types unknown" issue: print the param name being inferred
+    //std::cout << "[DEBUG] Inferring type for param: " << param << "\n";
 
 
     // Print exact bytes to reveal hidden characters
-    std::cout << "v2 - [DEBUG] param='" << param << "' length=" << param.size() << " bytes: ";
-    for (unsigned char c : param) {
-        std::cout << std::hex << (int)c << " ";
-    }
-    std::cout << std::dec << "\n";
-
+    //std::cout << "v2 - [DEBUG] param='" << param << "' length=" << param.size() << " bytes: ";
+    //for (unsigned char c : param) {
+    //    std::cout << std::hex << (int)c << " ";
+    //}
+    //std::cout << std::dec << "\n";
 
     // check by prefix convention in worrkload file
     if (param.find("W_KEY") != std::string::npos) return "warehouse";
@@ -354,10 +371,10 @@ std::string inferTypeFromParam(const std::string& param) {
     if (param.find("S_KEY") != std::string::npos) return "stock";
     if (param.find("C_KEY") != std::string::npos) return "customer";
     // workload1 uses FROM_KEY/TO_KEY -> account keys
-    if (param.find("From_KEY") != std::string::npos 
-    || param.find("To_KEY") != std::string::npos) return "account";
+    if (param.find("FROM_KEY") != std::string::npos 
+    || param.find("TO_KEY") != std::string::npos) return "account";
     
-    std::cout << "[DEBUG] unknown param type for: " << param << "\n";
+    // std::cout << "[DEBUG] unknown param type for: " << param << "\n";
     
     return "unknown";
 }
@@ -371,8 +388,8 @@ std::map<std::string, std::string> instantiateTransaction(
     const TxnTemplate& tmpl,
     const KeySpace& ks,
     std::mt19937& rng,
-    double hot_prob = 0.0,
-    int    hot_size = 10)
+    double hot_prob,
+    int    hot_size)
 {
     std::map<std::string, std::string> binding;
 
@@ -436,8 +453,10 @@ void testWorkloadExecution(const Workload& workload, const KeySpace& ks, RocksDB
         }
 
         //step 5: execute the transaction
+        TransactionManager txn_mgr(db.getDB(), CCMode::OCC); // create a transaction manager with a test RocksDB instance
+        TransactionManager& dummy_txn_mgr = txn_mgr; // create a dummy transaction manager
         try{
-            executeTxn(tmpl, binding, db);
+            executeTxn(tmpl, binding, /*txn_mgr=*/dummy_txn_mgr); // use a dummy txn manager for now since we haven't implemented CC yet
             std::cout << "Execution: OK\n";
         } catch (const std::exception& e) {
             std::cout << "Execution: ERROR - " << e.what() << "\n";

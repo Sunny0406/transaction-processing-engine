@@ -27,6 +27,13 @@ public:
     using txn_id_t = uint64_t; 
     explicit Transaction(txn_id_t id) : txn_id_(id), state_(TxnStatus::RUNNING) {}
 
+    // For OCC: timestamp when this transaction began reading
+    uint64_t read_ts_{0};
+
+    // Getters and setters
+    uint64_t GetReadTs() const { return read_ts_; }
+    void SetReadTs(uint64_t ts) { read_ts_ = ts; }
+
     txn_id_t GetTxnId() const { return txn_id_; }
     TxnStatus GetStatus() const { return state_; }
     void SetStatus(TxnStatus new_status) { state_ = new_status; }

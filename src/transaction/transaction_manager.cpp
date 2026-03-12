@@ -1,50 +1,117 @@
 #include "transaction_manager.h" 
+#include "transaction.h"
+#include "lock_manager.h"
+
 #include <stdexcept> // for std::runtime_error
 #include <rocksdb/db.h> // for RocksDB DB and Status
 #include <rocksdb/write_batch.h> // for RocksDB WriteBatch
 #include <type_traits> // for std::is_pointer_v used when assigning opened DB to member
-
 // WriteBatch allows us to group multiple writes into a single atomic operation at commit time
-// Constructor: open (or create) the RocksDB database at the given path
-// Destructor: close the database (RocksDBWrapper will handle this)
-TransactionManager::TransactionManager(const std::string& db_path) {
-    rocksdb::Options options;
-    options.create_if_missing = true; // create DB if it doesn't exist yet
 
-    rocksdb::Status status = rocksdb::DB::Open(options, db_path, &db_);
-    if (!status.ok()) {
-        throw std::runtime_error("Failed to open RocksDB: " + status.ToString());
+
+// ---------------------------------------------------------------------
+// Constructor
+// Takes a raw rocksdb::DB* from your existing RocksDBWrapper.
+// RocksDBWrapper keeps ownership - TransactionManager just borrows it.
+// -------------------------------------------------------------------------=
+TransactionManager::TransactionManager(rocksdb::DB* db, CCMode mode) : db_(db), cc_mode_(mode) {
+    if (!db_) {
+        throw std::runtime_error("TransactionManager: null DB pointer");
     }
 }
-
+TransactionManager::~TransactionManager() = default;
 
 // destructor
 // for std::unique_ptr<rocksdb::DB> db_;, we don't need to manually delete db_ 
 // since unique_ptr will automatically clean up when TransactionManager is destroyed. 
 // However, if we were using a raw pointer, we would need to call delete db_ here to avoid memory leaks. 
 // In this implementation, we can rely on unique_ptr's destructor to handle cleanup, so we don't need to explicitly delete db_ in the destructor.
-TransactionManager::~TransactionManager() {
-    // db_ is a unique_ptr, so it will be automatically destroyed when TransactionManager is destroyed
-}
+// TransactionManager::~TransactionManager() {
+//     // db_ is a unique_ptr, so it will be automatically destroyed when TransactionManager is destroyed
+// }
 
 // lifecycle
-// Begin: create a new Transaction with a unique ID and store it in txn_map
+// ---------------------------------------------------------------------------------------
+// Begin
+//
+// all modes: create a new Txn and assign it a unique ID.
+// OCC only: snapshot the current global timestamp as read_ts_.
+//           Any key whose version_store_ entry is > read_ts_ at commit time 
+//           means the key was modified after this transaction started → conflict.
+// ---------------------------------------------------------------------------------------
 Transaction* TransactionManager::Begin(){
     // generate a unique transaction ID
     auto txn_id = next_txn_id_.fetch_add(1);
     auto txn = std::make_unique<Transaction>(txn_id);
-    auto* ptr = txn.get();
+    auto* ptr = txn.get(); // keep raw pointer for return, ownership is still with unique_ptr in txn_map
+
+    // OCC: record the timestamp at which this transaction started reading
+    if (cc_mode_ == CCMode::OCC) {
+        ptr->SetReadTs(global_timestamp_.load()); // read_ts_ = current global timestamp
+    }
+
     txn_map_.emplace(txn_id, std::move(txn));
     return ptr;
 }
 
-//Commit: flush buffered writes to RocksDB atomically using WriteBatch
+// ---------------------------------------------------------------------------------------
+//Commit
+//
+// NONE -> flush write_buffer to RocksDB, done.
+//
+// OCC -> 1. Acquire validation_mutex_ (sequential validation)
+//        2. For every key in read_set: check version_store_[key] > read_ts_
+//           -> If any conflict found, release validation_mutex_, mark txn aborted, return false
+//        3. Assign commit_ts = ++global_timestamp_
+//        4. Flush write_buffer to RocksDB via WriteBatch
+//        5. Stamp version_store_[key] = commit_ts for each written key
+//        6. Release validation_mutex_, mark txn committed, return true
+//
+// 2PL -> flush write_buffer to RocksDB, then release all locks
+//        (Locks were acquired before executeTxn body ran via AcquireAllLocks)
 bool TransactionManager::Commit(Transaction* txn) {
     // check state and return false if not running
     if (txn->GetStatus() != TxnStatus::RUNNING) {
         return false;
     }
 
+    // -- OCC: validate before writing --
+    if (cc_mode_ == CCMode::OCC) {
+        // Acquire validation lock - only one txn validates at a time
+        std::unique_lock<std::mutex> val_lock(validation_mutex_);
+
+        if (!ValidateReadSet(txn)) {
+            // Conflict detected: abort this transaction
+            // val_lock released automatically on scope exit
+            txn->SetStatus(TxnStatus::ABORTED); // mark transaction as aborted on conflict
+            return false;
+        }
+
+        // Assign a commit timestamp while still holding the validation lock
+        uint64_t commit_ts = global_timestamp_.fetch_add(1) + 1; // increment global timestamp for this commit
+        
+        // Flush writes to RocksDB
+        rocksdb::WriteBatch batch;
+        for (const auto& [key, value] : txn -> GetWriteBuffer()) {
+            batch.Put(key, value.dump()); // convert json to string for storage
+            // dump method: return a string representation of the JSON value, which can be stored in RocksDB
+        }
+        rocksdb::Status status = db_->Write(rocksdb::WriteOptions(), &batch);
+        if (!status.ok()) {
+            txn->SetStatus(TxnStatus::ABORTED); // mark transaction as aborted on failure
+            return false;
+        }
+
+        // Swap version_store with commit_ts for each written key
+        UpdateVersionStore(txn, commit_ts);
+
+        txn->SetStatus(TxnStatus::COMMITTED); // mark transaction as committed
+        return true;
+        // val_lock released automatically on scope exit
+
+
+    }
+    // --- NONE / 2PL: flush to RocksDB -------------------------------------------------------------------
     rocksdb::WriteBatch batch;
     for (const auto& [key, value]: txn->GetWriteBuffer()){
         batch.Put(key, value.dump()); // convert json to string for storage
@@ -55,19 +122,51 @@ bool TransactionManager::Commit(Transaction* txn) {
     rocksdb::Status status = db_->Write(write_opts, &batch);
     if (!status.ok()) {
         txn->SetStatus(TxnStatus::ABORTED); // mark transaction as aborted on failure
+        if (cc_mode_ == CCMode::TWO_PL){
+            // release locks if 2PL
+            lock_manager_.ReleaseAll(txn->GetTxnId());
+        }
         return false;
     }
+    
     txn->SetStatus(TxnStatus::COMMITTED); // mark transaction as committed on success
+    
+    // --- 2PL: release locks after commit -------------------------------------------------------------------
+    if (cc_mode_ == CCMode::TWO_PL){
+        // release locks if 2PL
+        lock_manager_.ReleaseAll(txn->GetTxnId());
+    }
+
     return true;
 }
 
-// Abort: mark transaction as aborted and remove it from txn_map
+
+// ---------------------------------------------------------------------------------------
+// Abort
+//
+// ALL modes: discard write_buffer (nothing written to DB).
+// 2PL only: release any locks this transaction holds.
+// ---------------------------------------------------------------------------------------
 void TransactionManager::Abort(Transaction* txn) {
     // discard write buffer, so nothing writed to DB
     txn->SetStatus(TxnStatus::ABORTED);
+
+    if (cc_mode_ == CCMode::TWO_PL){
+        // release locks if 2PL
+        lock_manager_.ReleaseAll(txn->GetTxnId());
+    }
+
 }
 
 // Transaction Read/Write
+
+// ---------------------------------------------------------------------------------------
+// Read
+//
+// ALL modes:
+// 1. check write_buffer first (read your own writes)
+// 2. Fall back to RocksDB
+// 3. Record in read_set_ (used by OCC validation at commit time)
 
 bool TransactionManager::Read(Transaction* txn, const std::string&key, json& out_value) {
     // check write buffer first (read your own writes)
@@ -104,4 +203,78 @@ void TransactionManager::Write(Transaction* txn, const std::string& key, const j
     }
     // buffer the write in the transaction's write buffer
     txn->BufferWrite(key, value);
+}
+
+// direct DB access (data loading only)
+bool TransactionManager::DirectInsert(const std::string& key, const json& value){
+    std::string raw;
+    rocksdb::Status status = db_->Put(rocksdb::WriteOptions(), key, value.dump());
+    return status.ok();
+}
+
+bool TransactionManager::DirectRead(const std::string& key, json& out_value){
+    std::string raw;
+    rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), key, &raw);
+    if(!status.ok()) return false;
+    out_value = json::parse(raw);
+    return true;
+}
+
+// ---------------------------------------------------
+// AcquireAllLocks for 2PL
+//
+// Called by the workload runner BEFORE executeTxn body runs.
+//
+// Usage in workload runner:
+//   int retry = 0;
+//   while (!mgr.AcquireLocks(txn, keys)) {
+//      std::this_thread::sleep_for{
+//          std::chrono::milliseconds(LockManager::BackoffMs(retry++))}
+//   }
+//   executeTxn(tmpl, binding, mgr);
+// ---------------------------------------------------
+bool TransactionManager::AcquireAllLocks(Transaction* txn,
+                                         const std::vector<std::string>& keys){
+    return lock_manager_.AcquireAll(txn->GetTxnId(), keys);
+}
+
+// ---------------------------------------------------
+// ValidateOCC (private)
+//
+// For every key the transaction READ:
+//   version_store_[key] > txn->read_ts_ -> stale read -> conflict -> abort
+//
+// Return true = no conflict
+// Return false = conflict detected
+// ---------------------------------------------------
+bool TransactionManager::ValidateReadSet(const Transaction* txn){
+    std::lock_guard<std::mutex> vs_lock(version_store_mutex_); // protect version_store_ during validation
+
+    uint64_t read_ts = txn->GetReadTs();
+
+    for (const auto& [key, _] : txn->GetReadSet()){
+        auto it = version_store_.find(key);
+        if (it == version_store_.end()) {
+            continue; // key not in version store means it hasn't been modified since txn started, so no conflict
+        }
+        if (it->second > read_ts) {
+            return false; // conflict detected: key was modified after txn started
+        }
+    }
+
+    return true; // no conflicts detected
+}
+
+// ---------------------------------------------------
+// UpdateVersionStoreOCC (private)
+//
+// Stamp every written key with commit_ts so future OCC validators can detect
+// conflicts against this transaction's writes.
+// ---------------------------------------------------
+void TransactionManager::UpdateVersionStore(const Transaction* txn, uint64_t commit_ts){
+    std::lock_guard<std::mutex> vs_lock(version_store_mutex_); // protect version_store_ during update
+
+    for (const auto& [key, _] : txn->GetWriteBuffer()){
+        version_store_[key] = commit_ts; // update version store with this transaction's commit timestamp for each written key
+    }
 }

@@ -24,12 +24,15 @@ public:
 
     // Delete a key
     void del(const std::string& key);
-
+ 
     // Check existence without fetching full value
     bool exists(const std::string& key);
 
     // Get all known keys (needed for keyspace indexing)
     std::vector<std::string> getAllKeys();
+
+    // getdb
+    rocksdb::DB* getDB();
 
 private:
     std::unique_ptr<rocksdb::DB> db_;  // unique_ptr manages lifetime
