@@ -87,7 +87,7 @@ public:
     void SetCCMode(CCMode mode) { cc_mode_ = mode; }
 
     // helpers
-    rocksdb::DB* GetDB() const { return db_.get(); } // for direct DB access if needed (e.g. for building keyspace index)
+    rocksdb::DB* GetDB() const { return db_; } // for direct DB access if needed (e.g. for building keyspace index)
     
     // direct db access
     bool DirectInsert(const std::string& key, const json& value);
@@ -102,7 +102,7 @@ private:
     void UpdateVersionStore(const Transaction* txn, uint64_t commit_ts);
 
     // ----- Members -----
-    std::unique_ptr<rocksdb::DB> db_; // raw pointer to RocksDB instance (managed by main.cpp)
+    rocksdb::DB* db_; // borrows only
     CCMode cc_mode_; // concurrency control mode (NONE, OCC, TWO_PL)
 
     std::atomic<Transaction::txn_id_t> next_txn_id_{0}; // for generating unique txn IDs

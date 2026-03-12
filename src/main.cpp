@@ -152,7 +152,7 @@ auto main(int argc, char *argv[]) -> int {
     // testWorkloadExecution(workload, ks2, db);
 
     // switch CC mode
-    TransactionManager txn_mgr(db.getDB(), CCMode::OCC); // start with OCC for testing
+    TransactionManager txn_mgr(db.getDB(), CCMode::TWO_PL); // start with 2PL for testing
     RunWorkload(txn_mgr, workload.templates, ks2, /*num_transactions=*/10, /*hot_prob=*/0.5, /*hot_size=*/5);
 
     return 0;

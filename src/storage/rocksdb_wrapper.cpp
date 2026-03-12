@@ -58,3 +58,8 @@ std::vector<std::string> RocksDBWrapper::getAllKeys() {
 rocksdb::DB* RocksDBWrapper::getDB() {
     return db_.get();  // return raw pointer from unique_ptr
 }
+
+// close / delete 
+RocksDBWrapper::~RocksDBWrapper() {
+    db_.reset();   // explicitly close DB before destruction
+}

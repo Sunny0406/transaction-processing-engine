@@ -19,7 +19,7 @@ TransactionManager::TransactionManager(rocksdb::DB* db, CCMode mode) : db_(db), 
         throw std::runtime_error("TransactionManager: null DB pointer");
     }
 }
-TransactionManager::~TransactionManager() = default;
+TransactionManager::~TransactionManager(){}
 
 // destructor
 // for std::unique_ptr<rocksdb::DB> db_;, we don't need to manually delete db_ 

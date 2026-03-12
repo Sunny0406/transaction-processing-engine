@@ -50,3 +50,7 @@ find_library(ROCKSDB_LIB rocksdb REQUIRED)
 
 target_include_directories(txn-benchmark PRIVATE ${ROCKSDB_INCLUDE_DIR})
 target_link_libraries(txn-benchmark PRIVATE ${ROCKSDB_LIB})
+
+# Address sanitizer for debugging
+# target_compile_options(txn-benchmark PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+# target_link_options(txn-benchmark PRIVATE -fsanitize=address)

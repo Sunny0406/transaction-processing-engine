@@ -14,7 +14,7 @@ public:
     RocksDBWrapper(const std::string& db_path);
 
     // Destructor: unique_ptr auto-closes DB
-    ~RocksDBWrapper() = default;
+    ~RocksDBWrapper();
 
     // Write: serialize json → string, store in RocksDB
     void put(const std::string& key, const json& value);
