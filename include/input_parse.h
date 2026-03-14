@@ -102,5 +102,19 @@ std::map<std::string, std::string> instantiateTransaction(
     double hot_prob,
     int    hot_size);
 
-void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
+// ── Transaction execution ─────────────────────────────────────────────────────
+
+// Version 1 (OCC / NONE):
+//   Creates its own transaction via Begin() internally.
+//   Returns true if committed, false if aborted (OCC validation failure).
+bool executeTxn(const TxnTemplate& tmpl,
+                const map<string, string>& binding,
                 TransactionManager& txn_mgr);
+
+// Version 2 (2PL):
+//   Accepts an already-begun Transaction* (locks acquired before calling this).
+//   Returns true if committed, false if aborted.
+bool executeTxnWithTxn(const TxnTemplate& tmpl,
+                       const map<string, string>& binding,
+                       TransactionManager& txn_mgr,
+                       Transaction* txn);

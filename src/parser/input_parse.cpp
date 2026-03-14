@@ -231,8 +231,8 @@ Workload parseWorkloadFile(const std::string& filename) {
 
 
 // bind real keys to param names
-void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
-                TransactionManager& txn_mgr) {
+bool executeTxnWithTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
+                TransactionManager& txn_mgr, Transaction* txn) {
     // binding: e.g. "FROM_KEY" → "A_123", "TO_KEY" → "A_456"
     // which means key to key_param mapping for this txn instance
 
@@ -241,7 +241,7 @@ void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
     map<string, int> plain_vars; // for plain int variables like "o_id"
 
     // Begin the transaction by using Begin()
-    Transaction* txn = txn_mgr.Begin();
+    // Transaction* txn = txn_mgr.Begin();
 
 
 
@@ -256,11 +256,12 @@ void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
                 // use TransactionManager's Read() to read and record in read_set for OCC validation later
                 bool success = txn_mgr.Read(txn, key, vars[op.var]); // read from db and record in txn's read set for OCC
                 if (!success) {
-                    throw std::runtime_error("Failed to read from transaction manager");
+                    txn_mgr.Abort(txn); // abort txn if read fails (e.g. key not found)
+                    throw std::runtime_error("Key not found: " + key);  // ← throw, don't return false
                 }
-
                 break;
             }
+
             case OpType::WRITE: {
                 // WRITE(key_param, var) -> write local value(var) to db at key(key_param)
                 string key = binding.at(op.key_param); // e.g. "FROM_KEY" →
@@ -291,12 +292,26 @@ void executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
                 break;
             }
             case OpType::COMMIT:{
-                txn_mgr.Commit(txn); // for now just commit immediately without validation since we haven't implemented CC yet
-                break; // let CC layer handle commit logic (validation, flushing writes, etc.)
+                return txn_mgr.Commit(txn); // for now just commit immediately without validation since we haven't implemented CC yet
+                //break; // let CC layer handle commit logic (validation, flushing writes, etc.)
             }
         }   
     
     }
+    // Fallback if workload has no explicit COMMIT op
+    return txn_mgr.Commit(txn); 
+}
+
+
+// -----------------------------------------------
+//
+// Calls Begin() internally, then delegates to executeTxnWithTxn() to run the txn body, and finally handles commit/abort based on success
+// used by OCC and None workers when where Begin() happens inside the function.
+// -----------------------------------------------
+bool executeTxn(const TxnTemplate& tmpl, const map<string, string>& binding,
+                TransactionManager& txn_mgr) {
+    Transaction* txn = txn_mgr.Begin();
+    return executeTxnWithTxn(tmpl, binding, txn_mgr, txn);
 }
 
 // For debugging: print the parsed workload

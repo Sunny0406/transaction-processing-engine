@@ -28,7 +28,7 @@ public:
     explicit Transaction(txn_id_t id) : txn_id_(id), state_(TxnStatus::RUNNING) {}
 
     // For OCC: timestamp when this transaction began reading
-    uint64_t read_ts_{0};
+    
 
     // Getters and setters
     uint64_t GetReadTs() const { return read_ts_; }
@@ -67,6 +67,8 @@ public:
     }
 
 private:
+    uint64_t read_ts_{0};
+
     txn_id_t txn_id_;
     TxnStatus state_;
     std::unordered_map<std::string, json> read_set_; // read values(for OCC)

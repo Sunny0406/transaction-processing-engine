@@ -44,6 +44,10 @@ enum class CCMode {
  
 class TransactionManager {
 public:
+
+    // add mutex
+    mutable std:: mutex txn_map_mutex_; // protects txn_map_ for thread safety
+
     /**
      * Open (or create) the RocksDB database at the given path.
      * Throws std::runtime_error if the database cannot be opened.
@@ -94,6 +98,7 @@ public:
     bool DirectRead(const std::string& key, json& value_out);
 
 private:
+    
 
     // ----- OCC helpers -----
     // check read_set against version_store_; returns true if no conflicts, false if any key was modified since read
@@ -105,7 +110,7 @@ private:
     rocksdb::DB* db_; // borrows only
     CCMode cc_mode_; // concurrency control mode (NONE, OCC, TWO_PL)
 
-    std::atomic<Transaction::txn_id_t> next_txn_id_{0}; // for generating unique txn IDs
+    std::atomic<Transaction::txn_id_t> next_txn_id_{1}; // for generating unique txn IDs
 
     // All live transactions: id -> Transaction
     std::unordered_map<Transaction::txn_id_t, std::unique_ptr<Transaction>> txn_map_; // active transactions indexed by txn_id

@@ -6,6 +6,7 @@
 #include <rocksdb/db.h> // for RocksDB DB and Status
 #include <rocksdb/write_batch.h> // for RocksDB WriteBatch
 #include <type_traits> // for std::is_pointer_v used when assigning opened DB to member
+#include <iostream> // for debug printing
 // WriteBatch allows us to group multiple writes into a single atomic operation at commit time
 
 
@@ -48,9 +49,15 @@ Transaction* TransactionManager::Begin(){
     // OCC: record the timestamp at which this transaction started reading
     if (cc_mode_ == CCMode::OCC) {
         ptr->SetReadTs(global_timestamp_.load()); // read_ts_ = current global timestamp
+         //std::cout << "[DEBUG] txn " << txn_id
+         //         << " read_ts=" << ptr->GetReadTs() << "\n";  // should NOT be 0
     }
 
-    txn_map_.emplace(txn_id, std::move(txn));
+    {
+        std::lock_guard<std::mutex> lk(txn_map_mutex_); // lock txn_map for thread safety
+        txn_map_.emplace(txn_id, std::move(txn)); // store the transaction in the map, ownership is transferred to txn_map
+    }
+
     return ptr;
 }
 
@@ -70,6 +77,16 @@ Transaction* TransactionManager::Begin(){
 // 2PL -> flush write_buffer to RocksDB, then release all locks
 //        (Locks were acquired before executeTxn body ran via AcquireAllLocks)
 bool TransactionManager::Commit(Transaction* txn) {
+
+    // ── TEMPORARY DEBUG ─────────────────────────────────────────────
+    // std::cout << "[COMMIT] txn_id=" << txn->GetTxnId()
+    //           << " status=" << static_cast<int>(txn->GetStatus())
+    //           << " cc_mode=" << static_cast<int>(cc_mode_)
+    //           << " read_set=" << txn->GetReadSet().size()
+    //           << " write_buf=" << txn->GetWriteBuffer().size() << "\n";
+    // ────────────────────────────────────────────────────────────────
+
+
     // check state and return false if not running
     if (txn->GetStatus() != TxnStatus::RUNNING) {
         return false;
@@ -131,6 +148,12 @@ bool TransactionManager::Commit(Transaction* txn) {
     
     txn->SetStatus(TxnStatus::COMMITTED); // mark transaction as committed on success
     
+    // clean the txns in txn_map_
+    // {
+    //     std::lock_guard<std::mutex> lk(txn_map_mutex_); // lock txn_map for thread safety
+    //     txn_map_.erase(txn->GetTxnId()); // remove the transaction from the map since it's no longer active
+    // }
+
     // --- 2PL: release locks after commit -------------------------------------------------------------------
     if (cc_mode_ == CCMode::TWO_PL){
         // release locks if 2PL
@@ -150,6 +173,12 @@ bool TransactionManager::Commit(Transaction* txn) {
 void TransactionManager::Abort(Transaction* txn) {
     // discard write buffer, so nothing writed to DB
     txn->SetStatus(TxnStatus::ABORTED);
+
+    // clean the txns in txn_masp_
+    // {
+    //     std::lock_guard<std::mutex> lk(txn_map_mutex_); // lock txn_map for thread safety
+    //     txn_map_.erase(txn->GetTxnId()); // remove the transaction from the map since it's no longer active
+    // }
 
     if (cc_mode_ == CCMode::TWO_PL){
         // release locks if 2PL
@@ -247,22 +276,31 @@ bool TransactionManager::AcquireAllLocks(Transaction* txn,
 // Return true = no conflict
 // Return false = conflict detected
 // ---------------------------------------------------
-bool TransactionManager::ValidateReadSet(const Transaction* txn){
-    std::lock_guard<std::mutex> vs_lock(version_store_mutex_); // protect version_store_ during validation
+bool TransactionManager::ValidateReadSet(const Transaction* txn) {
+    std::lock_guard<std::mutex> vs_lock(version_store_mutex_);
 
     uint64_t read_ts = txn->GetReadTs();
 
-    for (const auto& [key, _] : txn->GetReadSet()){
+    // ── TEMPORARY DEBUG ──────────────────────────────────────────────
+    // std::cout << "[VALIDATE] read_ts=" << read_ts
+    //           << " read_set_size=" << txn->GetReadSet().size()
+    //           << " version_store_size=" << version_store_.size() << "\n";
+    // for (const auto& [key, ver] : version_store_) {
+    //     std::cout << "[VALIDATE]   version_store[" << key << "]=" << ver << "\n";
+    // }
+    // ─────────────────────────────────────────────────────────────────
+
+    for (const auto& [key, _] : txn->GetReadSet()) {
         auto it = version_store_.find(key);
-        if (it == version_store_.end()) {
-            continue; // key not in version store means it hasn't been modified since txn started, so no conflict
-        }
+        if (it == version_store_.end()) continue;
         if (it->second > read_ts) {
-            return false; // conflict detected: key was modified after txn started
+            // std::cout << "[VALIDATE] CONFLICT: key=" << key
+            //           << " version=" << it->second
+            //           << " > read_ts=" << read_ts << "\n";
+            return false;
         }
     }
-
-    return true; // no conflicts detected
+    return true;
 }
 
 // ---------------------------------------------------

@@ -158,11 +158,13 @@ int LockManager::BackoffMs(int retry_count, int base_ms, int max_ms) {
     int exp_wait = base_ms;
     for (int i = 0; i < retry_count; ++i) {
         exp_wait *= 2;
-        if (exp_wait >= max_ms) {
-            exp_wait = max_ms;
-            break;
-        }
+        if (exp_wait >= max_ms) { exp_wait = max_ms; break; }
     }
-    int jitter = std::rand() % (base_ms + 1); // 0 to base_ms
-    return exp_wait + jitter;
+
+    // thread_local: each thread has its own rng — no mutex, no data race
+    thread_local std::mt19937 rng(
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::uniform_int_distribution<int> dist(0, base_ms);
+
+    return exp_wait + dist(rng);
 }
